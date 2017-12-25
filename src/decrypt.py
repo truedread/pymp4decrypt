@@ -47,7 +47,7 @@ def main():
         level=logging.INFO
     )
 
-    Decrypt().decrypt(args.key, args.input, args.output)
+    decrypt(args.key, args.input, args.output)
     return
 
 
@@ -67,57 +67,51 @@ def fix_headers(box):
     return
 
 
-class Decrypt(object):
-    """Decrypt class"""
-    def __init__(self):
-        self.logger = logging.getLogger()
+def decrypt(key, inp, out):
+    """
+    decrypt()
 
-    def decrypt(self, key, inp, out):
-        """
-        decrypt()
+    @param key: AES-128 CENC key in bytes
+    @param inp: Open input file
+    @param out: Open output file
+    """
 
-        @param key: AES-128 CENC key in bytes
-        @param inp: Open input file
-        @param out: Open output file
-        """
+    with BufferedReader(inp) as reader:
+        senc_boxes = deque()
 
-        self.logger.info('Parsing MP4 stream and writing decrypted output')
-        with BufferedReader(inp) as reader:
-            senc_boxes = deque()
+        while reader.peek(1):
+            box = Box.parse_stream(reader)
+            fix_headers(box)
 
-            while reader.peek(1):
-                box = Box.parse_stream(reader)
-                fix_headers(box)
+            if box.type == b'moof':
+                senc_boxes.extend(BoxUtil.find(box, b'senc'))
+            elif box.type == b'mdat':
+                senc_box = senc_boxes.popleft()
 
-                if box.type == b'moof':
-                    senc_boxes.extend(BoxUtil.find(box, b'senc'))
-                elif box.type == b'mdat':
-                    senc_box = senc_boxes.popleft()
+                clear_box = b''
 
-                    clear_box = b''
+                with BytesIO(box.data) as box_bytes:
+                    for sample in senc_box.sample_encryption_info:
+                        counter = Counter.new(
+                            128,
+                            initial_value=int(
+                                binascii.hexlify(sample.iv),
+                                16
+                            ) << 64
+                        )
+                        cipher = AES.new(
+                            key,
+                            AES.MODE_CTR,
+                            counter=counter
+                        )
 
-                    with BytesIO(box.data) as box_bytes:
-                        for sample in senc_box.sample_encryption_info:
-                            counter = Counter.new(
-                                128,
-                                initial_value=int(
-                                    binascii.hexlify(sample.iv),
-                                    16
-                                ) << 64
-                            )
-                            cipher = AES.new(
-                                key,
-                                AES.MODE_CTR,
-                                counter=counter
-                            )
-
-                            for subsample in sample.subsample_encryption_info:
-                                clear_box += box_bytes.read(subsample.clear_bytes)
-                                cipher_bytes = box_bytes.read(subsample.cipher_bytes)
-                                clear_box += cipher.decrypt(cipher_bytes)
-                    box.data = clear_box
-                out.write(Box.build(box))
-        return
+                        for subsample in sample.subsample_encryption_info:
+                            clear_box += box_bytes.read(subsample.clear_bytes)
+                            cipher_bytes = box_bytes.read(subsample.cipher_bytes)
+                            clear_box += cipher.decrypt(cipher_bytes)
+                box.data = clear_box
+            out.write(Box.build(box))
+    return
 
 if __name__ == '__main__':
     main()
