@@ -62,10 +62,9 @@ def fix_headers(box):
         original_format = frma_box.original_format
     for stsd_box in BoxUtil.find(box, b'stsd'):
         for entry in stsd_box.entries:
-            if entry.format == b'encv':
+            if b'enc' in entry.format:
                 entry.format = original_format
     return
-
 
 def decrypt(key, inp, out):
     """
@@ -78,37 +77,52 @@ def decrypt(key, inp, out):
 
     with BufferedReader(inp) as reader:
         senc_boxes = deque()
+        trun_boxes = deque()
 
         while reader.peek(1):
             box = Box.parse_stream(reader)
             fix_headers(box)
 
+            for stsd_box in BoxUtil.find(box, b'stsz'):
+                sample_size = stsd_box.sample_size
+
             if box.type == b'moof':
                 senc_boxes.extend(BoxUtil.find(box, b'senc'))
+                trun_boxes.extend(BoxUtil.find(box, b'trun'))
             elif box.type == b'mdat':
                 senc_box = senc_boxes.popleft()
+                trun_box = trun_boxes.popleft()
 
                 clear_box = b''
 
                 with BytesIO(box.data) as box_bytes:
-                    for sample in senc_box.sample_encryption_info:
+                    for sample, sample_info in zip(
+                        senc_box.sample_encryption_info,
+                        trun_box.sample_info
+                    ):
                         counter = Counter.new(
-                            128,
-                            initial_value=int(
-                                binascii.hexlify(sample.iv),
-                                16
-                            ) << 64
+                            64,
+                            prefix=sample.iv,
+                            initial_value=0
                         )
+
                         cipher = AES.new(
                             key,
                             AES.MODE_CTR,
                             counter=counter
                         )
 
-                        for subsample in sample.subsample_encryption_info:
-                            clear_box += box_bytes.read(subsample.clear_bytes)
-                            cipher_bytes = box_bytes.read(subsample.cipher_bytes)
+                        if sample_size:
+                            cipher_bytes = box_bytes.read(sample_size)
                             clear_box += cipher.decrypt(cipher_bytes)
+                        elif not sample.subsample_encryption_info:
+                            cipher_bytes = box_bytes.read(sample_info.sample_size)
+                            clear_box += cipher.decrypt(cipher_bytes)
+                        else:
+                            for subsample in sample.subsample_encryption_info:
+                                clear_box += box_bytes.read(subsample.clear_bytes)
+                                cipher_bytes = box_bytes.read(subsample.cipher_bytes)
+                                clear_box += cipher.decrypt(cipher_bytes)
                 box.data = clear_box
             out.write(Box.build(box))
     return
